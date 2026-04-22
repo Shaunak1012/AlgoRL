@@ -1,0 +1,62 @@
+env:
+  ticker: "SPY"
+  window_size: 60
+  half_spread: 0.0001
+  initial_cash: 100000.0
+  use_indicators: true
+
+data:
+  train_start: "2018-01-01"
+  train_end: "2020-12-31"
+  val_start: "2021-01-01"
+  val_end: "2021-12-31"
+  test_start: "2022-01-01"
+  test_end: "2024-12-31"
+  cache_dir: "data/"
+
+training:
+  seed: 42
+  total_steps: 100000
+  checkpoint_every: 50000
+  runs_dir: "runs/"
+
+multi_asset:
+  tickers: ["SPY", "QQQ", "IWM", "GLD", "TLT"]
+  window_size: 60         # T=60 for Transformer
+  half_spread: 0.0001
+  use_indicators: true
+  corr_window: 20
+  use_cvar: true
+  cvar_alpha: 0.05
+  cvar_lambda: 0.01
+  cvar_buffer_size: 252
+  # Phase C7/C8 — liquidity-aware env. Default off for r007 parity;
+  # flipped to true for r008_liquidity training.
+  use_liquidity_features: false
+  liquidity_noise_enabled: false
+  # Phase B — FinBERT sentiment features. Default off for r007/r008 parity;
+  # flipped to true for r009_liquidity_sentiment training.
+  use_sentiment_features: false
+
+transformer:
+  d_model: 64
+  n_layers: 2
+  n_heads: 4
+  dim_feedforward: 128
+  dropout: 0.1
+
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 256
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy: "MlpPolicy"     # MlpPolicy + custom features extractor (see DECISIONS 2026-04-20)
+  net_arch:               # actor + critic heads on top of Transformer features
+    - 128
+    - 128

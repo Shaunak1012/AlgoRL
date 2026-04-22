@@ -1,0 +1,48 @@
+env:
+  ticker: "SPY"
+  window_size: 1          # T=1 for MVP; T=60 when Transformer is added
+  half_spread: 0.0001     # 1 bps each side
+  initial_cash: 100000.0
+  use_indicators: true
+
+data:
+  train_start: "2018-01-01"
+  train_end: "2020-12-31"
+  val_start: "2021-01-01"
+  val_end: "2021-12-31"
+  test_start: "2022-01-01"
+  test_end: "2024-12-31"
+  cache_dir: "data/"
+
+training:
+  seed: 42
+  total_steps: 100000
+  checkpoint_every: 50000
+  runs_dir: "runs/"
+
+multi_asset:
+  tickers: ["SPY", "QQQ", "IWM", "GLD", "TLT"]
+  window_size: 1
+  half_spread: 0.0001
+  use_indicators: true
+  corr_window: 20
+  use_cvar: true
+  cvar_alpha: 0.05      # 5% tail
+  cvar_lambda: 0.01     # reduced from 0.1 — CVaR was dominating reward at 88%
+  cvar_buffer_size: 252 # rolling window ≈ 1 trading year
+
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 256            # rollout buffer size per env
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy: "MlpPolicy"
+  net_arch:               # actor + critic hidden layers
+    - 128
+    - 128
