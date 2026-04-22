@@ -1,0 +1,58 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# model checkpoints (large — use runs/ CSVs for results, retrain via notebooks)
+runs/**/*.zip
+runs/**/events.out.*
+
+# old development runs (r007 + r008 kept, early runs excluded)
+runs/20260420_*/
+runs/20260421_*/
+
+# raw scraped data + colab output zip
+data/headlines_raw.parquet
+colab_output_r008.zip
+
+# figures — keep PNG, exclude PDF/LaTeX build artifacts
+figures/*.pdf
+figures/*.aux
+figures/*.log
+
+# paper build artifacts (build from main.tex)
+paper/main.pdf
+paper/main.docx
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/missfont.log
+
+# notebook + test cache
+.ipynb_checkpoints/
+.pytest_cache/
+
+# internal project management (not relevant to repo viewers)
+CLAUDE.md
+SESSION_LOG.md
+STATE.md
+ISSUES.md
+PAPER_NOTES.md
+TODO.md
+
+# tool config
+.claude/
+
+# os
+.DS_Store
+Thumbs.db

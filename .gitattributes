@@ -1,0 +1,4 @@
+# Tell GitHub's Linguist to ignore generated/vendored files for language stats
+runs/ensemble_r007/tearsheet.html linguist-generated=true
+figures/*.svg linguist-generated=true
+notebooks/*.py linguist-generated=true
