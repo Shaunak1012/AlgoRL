@@ -1,0 +1,62 @@
+flowchart LR
+    %% Mermaid source for the system architecture diagram.
+    %% Render: npx @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.svg
+    %% Phase-A (orange) = Kyle's-lambda impact. Phase-C (blue) = liquidity feats + fill noise.
+    %% ===== Data layer =====
+    subgraph DATA["1. Data sources"]
+        direction TB
+        D1["5 ETF OHLCV<br/>SPY, QQQ, IWM, TLT, GLD<br/>2018&ndash;2024 daily, adj. close"]
+    end
+
+    %% ===== State assembly =====
+    subgraph STATE["2. MultiAssetTradingEnv state"]
+        direction TB
+        S1["Per-asset OHLCV + indicators<br/>RSI, MACD, BB, ATR<br/>(5 assets &times; 10 = 50)"]
+        S2["Rolling 20-day correlation<br/>upper triangle (10)"]
+        S3["Position vector (5)"]
+        S4["Liquidity-regime features<br/>vol z-score + OHLC dispersion<br/>(5 assets &times; 2 = 10)"]:::phaseC
+        S5["Observation<br/>R^65 base / R^75 with Phase-C"]
+    end
+    S1 --> S5
+    S2 --> S5
+    S3 --> S5
+    S4 --> S5
+
+    %% ===== Encoder =====
+    subgraph ENC["3. Transformer encoder"]
+        direction TB
+        E1["Causal self-attention<br/>T = 60, d_model = 64<br/>2 layers, 4 heads, pre-LN"]
+    end
+
+    %% ===== Ensemble =====
+    subgraph ENS["4. PPO ensemble (5 heads)"]
+        direction LR
+        H1["seed 42"]
+        H2["seed 101"]
+        H3["seed 202"]
+        H4["seed 303"]
+        H5["seed 404"]
+    end
+
+    %% ===== Aggregator =====
+    AGG["5. Uncertainty-scaled aggregation<br/>a = mu / (1 + beta &middot; sigma_bar)<br/>beta = 5"]
+
+    %% ===== Execution / reward loop =====
+    subgraph EXEC["6. Execution and reward"]
+        direction TB
+        X1["Kyle's-lambda impact cost<br/>c = lambda &middot; (|trade|/ADV)^alpha"]:::phaseA
+        X2["Stochastic fill noise<br/>fill = close &middot; (1+epsilon)<br/>epsilon ~ N(0, sigma_t)"]:::phaseC
+        X3["CVaR-regularised reward<br/>r = dPnL - spread - impact - lambda&middot;CVaR"]
+    end
+
+    %% ===== Wiring =====
+    DATA --> STATE
+    STATE --> ENC
+    ENC --> H1 & H2 & H3 & H4 & H5
+    H1 & H2 & H3 & H4 & H5 --> AGG
+    AGG --> EXEC
+    EXEC -- "reward r_t, next obs s_{t+1}" --> STATE
+
+    %% ===== Class styling =====
+    classDef phaseA fill:#fff1e6,stroke:#d97706,stroke-width:2px,color:#7c2d12;
+    classDef phaseC fill:#e0e7ff,stroke:#2563eb,stroke-width:2px,color:#1e3a8a;
