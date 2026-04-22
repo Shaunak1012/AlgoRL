@@ -1,0 +1,57 @@
+data:
+  cache_dir: data/
+  test_end: '2024-12-31'
+  test_start: '2022-01-01'
+  train_end: '2020-12-31'
+  train_start: '2018-01-01'
+  val_end: '2021-12-31'
+  val_start: '2021-01-01'
+env:
+  half_spread: 0.0001
+  initial_cash: 100000.0
+  ticker: SPY
+  use_indicators: true
+  window_size: 60
+multi_asset:
+  corr_window: 20
+  cvar_alpha: 0.05
+  cvar_buffer_size: 252
+  cvar_lambda: 0.01
+  half_spread: 0.0001
+  liquidity_noise_enabled: true
+  tickers:
+  - SPY
+  - QQQ
+  - IWM
+  - GLD
+  - TLT
+  use_cvar: true
+  use_indicators: true
+  use_liquidity_features: true
+  window_size: 60
+ppo:
+  batch_size: 64
+  clip_range: 0.2
+  ent_coef: 0.01
+  gae_lambda: 0.95
+  gamma: 0.99
+  learning_rate: 0.0003
+  max_grad_norm: 0.5
+  n_epochs: 10
+  n_steps: 256
+  net_arch:
+  - 128
+  - 128
+  policy: MlpPolicy
+  vf_coef: 0.5
+training:
+  checkpoint_every: 50000
+  runs_dir: runs/
+  seed: 101
+  total_steps: 100000
+transformer:
+  d_model: 64
+  dim_feedforward: 128
+  dropout: 0.1
+  n_heads: 4
+  n_layers: 2
