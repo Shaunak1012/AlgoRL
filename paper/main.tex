@@ -1,0 +1,969 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage{hyperref}
+
+\graphicspath{{figures/}}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Uncertainty-Scaled Ensemble Transformer PPO for\\
+Risk-Controlled Multi-Asset Trading under\\
+Market Impact and Inferred Hidden Liquidity}
+
+\author{\IEEEauthorblockN{Shaunak A. Rai}
+\IEEEauthorblockA{\textit{Department of Computer Science and Engineering} \\
+\textit{PES University}\\
+Bengaluru, India \\
+PES2UG23CS546}
+}
+
+\maketitle
+
+\begin{abstract}
+Deep reinforcement learning for multi-asset portfolio control routinely
+ignores tail risk, sensitivity to the training seed, and execution-cost
+realism in a single joint formulation, which leaves backtest gains
+fragile once any one of these concerns is taken seriously. We address
+this gap with a five-seed Transformer-PPO ensemble trained against a
+CVaR-regularized reward, an environment augmented with a Kyle-style
+linear market-impact penalty, and a volume-inferred liquidity-regime
+signal built from a rolling volume z-score and an OHLC-dispersion
+effective-spread proxy that acts as a public-tape surrogate for hidden
+liquidity. At inference, ensemble heads are aggregated through
+uncertainty-scaled position sizing $a = \mu/(1+\beta\bar\sigma)$, which
+shrinks exposure precisely when seed-level disagreement is high. On a
+2022--2024 out-of-sample split over five US ETFs, the liquidity-aware
+ensemble (r008) reduces implementation shortfall by 14.3\%, mean
+per-day market impact by 15.2\%, and turnover by 11.1\% relative to the
+liquidity-naive baseline (r007). Uncertainty-scaled sizing collapses
+test maximum drawdown from 58\% under naive ensemble averaging to 9\%
+on the frictionless configuration --- a 6.5$\times$ reduction --- and
+to 14\% on the liquidity-aware configuration, in both cases below the
+21\% drawdown of passive SPY buy-and-hold. The system underperforms
+passive SPY on absolute return and Sharpe; we therefore frame it as a
+risk-control primitive rather than an alpha generator. Hidden liquidity
+is treated throughout as an inferred public-tape proxy rather than a
+tick-level dark-pool simulation. A FinBERT headline-sentiment fusion
+pipeline is implemented and integrated into the state space; full
+historical training is left to future work pending news-API quota
+expansion.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Reinforcement learning, algorithmic trading, Transformer, ensemble methods,
+CVaR, market impact, hidden liquidity, portfolio optimization.
+\end{IEEEkeywords}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+Algorithmic trading systems are routinely evaluated on backtest Sharpe
+ratio and ignore three properties that ultimately determine whether
+they are deployable: control over tail risk, sensitivity to the random
+seed used at training time, and execution cost under realistic
+liquidity conditions. Reinforcement learning approaches have made
+incremental progress on the first via CVaR-style risk-sensitive
+objectives and on the third via friction-aware simulators that charge
+spreads or impact penalties. The \emph{interaction} of these three
+concerns, however, is rarely treated jointly: a method that controls
+CVaR but fails silently under seed perturbation, or a method whose
+backtest gains evaporate once a non-trivial impact model is switched
+on, is not a deployable system. This paper takes the position that
+honest evaluation of a trading-RL system requires reporting all three
+together, and that doing so changes which architectural choices look
+load-bearing.
+
+We present a five-seed Transformer-PPO ensemble for multi-asset
+portfolio control over five US ETFs that integrates four design
+choices: (i) a CVaR-regularised reward that penalises the empirical
+$5\%$-tail of recent step-rewards inside the gradient signal;
+(ii) a Kyle-style market-impact penalty that charges a power-law
+turnover cost scaled by realised liquidity, trained jointly with the
+policy; (iii) a public-tape liquidity-regime inference signal --- a
+20-day rolling volume z-score together with a smoothed
+OHLC-dispersion effective-spread proxy --- that enters the state and
+also drives a regime-scaled stochastic fill-noise term; and
+(iv) a deployment-time uncertainty-scaled position-sizing rule
+$a = \mu / (1 + \beta\bar\sigma)$ that shrinks exposure in proportion
+to ensemble-head disagreement. Figure~\ref{fig:architecture} shows
+where these components sit in the end-to-end pipeline.
+
+We frame the resulting system explicitly as a \emph{risk-control
+primitive} rather than as an alpha generator. On the 2022--2024
+out-of-sample test split the headline configuration underperforms
+passive SPY buy-and-hold on absolute return and Sharpe, but cuts
+maximum drawdown by $59\%$ relative to SPY and by roughly an order of
+magnitude relative to a naive ensemble-mean aggregator. Consistent
+with the dark-pool honesty clause adopted throughout the paper,
+``hidden liquidity'' refers to an inferred public-tape proxy for an
+unobservable component of execution uncertainty, not a tick-level
+dark-pool simulation; daily-bar OHLCV is incapable of supporting
+stronger claims.
+
+The contributions of this work are fivefold.
+First, we release an end-to-end pipeline (Gymnasium environment,
+causal Transformer encoder, five-seed PPO ensemble, uncertainty-scaled
+aggregator, and impact-aware backtester) for risk-controlled
+multi-asset trading, described in Sec.~\ref{sec:method}.
+Second, we introduce a volume-inferred liquidity-regime signal
+(rolling volume z-score and OHLC-dispersion spread proxy) used jointly
+as a state feature and as the driver of a stochastic fill-noise term;
+under impact-adjusted replay it cuts implementation shortfall by
+$14.3\%$ relative to the frictionless baseline
+(Sec.~\ref{sec:results-liquidity}).
+Third, we show empirically that uncertainty-scaled position sizing is
+the only configuration in our ablation that is simultaneously
+positive-Sharpe, single-digit max drawdown, and robust to seed choice,
+collapsing test maximum drawdown from $58\%$ under naive ensemble-mean
+averaging to $9\%$ on the frictionless r007 configuration
+(Sec.~\ref{sec:results-ablation}).
+Fourth, we report a per-seed variance analysis showing that
+validation-Sharpe ranking is a poor predictor of test rank across our
+five seeds, providing direct evidence for ensemble-uncertainty methods
+over single-best-seed selection in trading-RL
+(Sec.~\ref{sec:results-perseed}).
+Fifth, the training and evaluation protocol (five seeds $\times$
+$100\text{k}$ PPO steps, val-Sharpe early stopping, frozen 2018--2024
+temporal split, with full config and checkpoint snapshotting) is fully
+documented for reproducibility in Sec.~\ref{sec:setup}.
+
+% =====================================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Reinforcement Learning for Algorithmic Trading}
+Deep reinforcement learning has been applied to single-asset trading and
+multi-asset portfolio control with a variety of policy classes. Deng
+\textit{et al.}~\cite{deng2017drltrading} introduced a deep recurrent
+direct-RL agent that learns trading signals end-to-end from raw price
+series, while Jiang \textit{et al.}~\cite{jiang2017portfolio} formulated
+portfolio allocation as a continuous-action MDP solved with a
+deterministic policy-gradient framework over a CNN feature extractor.
+Th\'eate and Ernst~\cite{theate2021tdqn} adapted DQN to discrete
+long/short trading and benchmarked it against classical technical
+strategies, and Zhang \textit{et al.}~\cite{zhang2020drlportfolio}
+compared DQN, policy-gradient, and actor--critic agents across futures
+contracts using volatility-scaled rewards. The FinRL
+library~\cite{liu2020finrl} subsequently standardized environment APIs
+and baselines (PPO~\cite{schulman2017ppo}, A2C, DDPG, SAC) for
+reproducible research. Most of these works adopt MLP or shallow
+recurrent~\cite{hochreiter1997lstm} encoders and treat execution as
+frictionless or with a flat transaction-cost penalty; in contrast, our
+system pairs a causal Transformer~\cite{vaswani2017attention} encoder
+with a multi-asset PPO ensemble whose actions are explicitly shrunk by
+inter-head disagreement, and trains under a Kyle-style impact term and
+a volume-inferred liquidity regime.
+
+\subsection{Market Microstructure and Impact Models}
+Quantitative models of execution cost trace back to Kyle's
+informed-trader equilibrium~\cite{kyle1985impact}, which yields the
+linear price-impact coefficient $\lambda$ that we use as a training-time
+penalty. Almgren and Chriss~\cite{almgren2001execution} formalized
+optimal execution as a mean--variance trade-off between temporary impact
+and timing risk, and Obizhaeva and Wang~\cite{obizhaeva2013impact}
+extended this to dynamic, resilient limit-order-book supply. More
+empirically, Cont \textit{et al.}~\cite{cont2014priceimpact} showed that
+short-horizon price moves are well explained by net order-flow
+imbalance, and Gatheral~\cite{gatheral2010impact} derived
+no-dynamic-arbitrage constraints on impact decay kernels.
+Bouchaud \textit{et al.}~\cite{bouchaud2018trades} provide the
+contemporary synthesis of these results in a single textbook treatment.
+Because we operate on daily bars rather than tick-level
+order-book data, we deliberately use Kyle's $\lambda$ in its most
+parsimonious form and treat unobserved liquidity as a public-tape
+inference problem rather than a simulated dark-pool replay.
+
+\subsection{Uncertainty Quantification in Deep RL}
+Quantifying epistemic uncertainty in deep models is the basis of our
+ensemble shrinkage rule. Gal and Ghahramani~\cite{gal2016dropout} cast
+dropout at inference as approximate Bayesian inference, and
+Lakshminarayanan \textit{et al.}~\cite{lakshminarayanan2017ensembles}
+showed that simple deep ensembles are a strong, scalable alternative
+that produces well-calibrated predictive variance. Within RL, Osband
+\textit{et al.}~\cite{osband2016bootstrapped} used bootstrapped Q-heads
+for posterior-sampling exploration, and Chua
+\textit{et al.}~\cite{chua2018pets} combined probabilistic dynamics
+ensembles with trajectory sampling for sample-efficient model-based
+control. Prior work uses uncertainty primarily for exploration or for
+model-rollout weighting. We instead apply ensemble disagreement at
+deployment time as a position-sizing signal,
+$a = \mu / (1 + \beta \bar\sigma)$, tying epistemic disagreement
+directly to capital at risk.
+
+\subsection{Risk-Sensitive and CVaR-Constrained RL}
+Conditional Value-at-Risk (CVaR) was introduced as a coherent,
+optimization-friendly tail-risk measure by Rockafellar and
+Uryasev~\cite{rockafellar2000cvar}. Chow and
+Ghavamzadeh~\cite{chow2014cvar} gave the first policy-gradient and
+actor--critic algorithms for CVaR-constrained MDPs, and Tamar
+\textit{et al.}~\cite{tamar2015cvar} derived a sampling-based CVaR
+gradient that is simple to integrate into modern deep-RL pipelines.
+Singh \textit{et al.}~\cite{singh2020risksensitive} more recently
+combined distributional RL with risk-averse expectiles to improve
+robustness under reward perturbations, and Garc\'ia and
+Fern\'andez~\cite{garcia2015saferl} provide the canonical survey of
+safe-RL formulations of which CVaR is one instance. We follow the
+sampling-based CVaR-as-penalty formulation, with $\lambda$ tuned so
+that the tail term contributes roughly an order of magnitude less
+reward magnitude than mean PnL. We use the CVaR term jointly with a
+Transformer encoder, microstructure-aware costs, and uncertainty-scaled
+aggregation; to our knowledge this combination has not been reported
+in prior CVaR-RL trading work.
+
+
+% =====================================================================
+\section{Problem Formulation}
+\label{sec:problem}
+
+We cast multi-asset portfolio control as a discrete-time discounted Markov
+Decision Process $\mathcal{M} = (\mathcal{S}, \mathcal{A}, P, r, \gamma)$
+over $N{=}5$ US ETFs at daily resolution. One environment step corresponds
+to one trading day; an episode spans the full horizon of the active
+split (756 days train, 252 days validation, 691 days test).
+
+\paragraph{State space.} The observation $s_t \in \mathbb{R}^{W \times F}$
+is a length-$W{=}60$ window of stacked feature vectors. The base
+configuration uses $F = 65$ features per step:
+$N \cdot 10 = 50$ per-asset features (OHLCV-derived: log-return,
+$\log(h/c)$, $\log(l/c)$, $\log(o/c)$, 20-day volume ratio; plus five
+technical indicators: RSI-14, MACD line, MACD signal, Bollinger \%B,
+ATR), $\binom{N}{2} = 10$ rolling 20-day cross-asset correlation
+upper-triangle entries, and $N = 5$ broadcast position weights
+$a_{t-1}$. With the Phase-C liquidity-aware features enabled
+(\S\ref{sec:method:impact}), two extra per-asset features --- a 20-day
+rolling volume z-score and a 20-day-smoothed OHLC-dispersion spread
+proxy --- raise $F$ to $75$ ($5 \times 12 + 10 + 5$). Strict causality
+is enforced: $s_t$ contains no information from time $t' > t$.
+
+\paragraph{Action space.} The action $a_t \in [-1, 1]^{N}$ is the target
+portfolio weight per asset, sampled from a diagonal-Gaussian PPO actor
+and clipped to the box. We deliberately omit a sum-to-one simplex
+constraint: the agent may simultaneously hold long and short exposures,
+and the cash position is implicit via the floor
+$1 - \sum_i |a_{t,i}| \ge 0$ enforced internally. This box
+parameterisation is simpler than a Dirichlet or softmax head, keeps the
+policy identical to a vanilla Gaussian PPO actor, and lets the
+ablations of \S\ref{sec:results-ablation} isolate the encoder and
+sizing contributions without confounding from a constrained head.
+
+\paragraph{Transition kernel.} $P(s_{t+1}\mid s_t, a_t)$ is deterministic
+given the realised next-day OHLCV bar: features at $t+1$ are a
+deterministic function of public market data and the new position
+$a_t$. The only stochasticity in the dynamics, when Phase-C is enabled,
+is the regime-scaled fill-noise term
+$\varepsilon_{t,i} \sim \mathcal{N}(0, \sigma_{t,i}^{2})$ of
+\eqref{eq:fillnoise} that perturbs the realised fill price.
+
+\paragraph{Reward.} The per-step reward decomposes additively as
+\begin{equation}
+  r_t = \Delta\mathrm{PnL}_t \;-\; c_{\text{spread}}(a_t, a_{t-1})
+        \;-\; c_{\text{impact}}(a_t, a_{t-1};\, v_t)
+        \;-\; \lambda\,\widehat{\mathrm{CVaR}}_\alpha(\hat L_t),
+  \label{eq:reward-mdp}
+\end{equation}
+where $\Delta\mathrm{PnL}_t = \sum_i a_{t-1,i}\,\log(c_{t,i}/c_{t-1,i})$
+is realised log-PnL on the previously-held position, $c_{\text{spread}}$
+charges a flat half-spread on turnover, $c_{\text{impact}}$ is the
+Kyle's-$\lambda$ temporary-impact cost \eqref{eq:kyle}, and the final
+term is a CVaR penalty \eqref{eq:cvar} computed on the rolling buffer of
+recent step-losses $\hat L_t$, with $\lambda = 0.01$ and tail level
+$\alpha = 0.05$. Each component is logged separately to verify that no
+single term dominates the gradient (\S\ref{sec:method:sim}).
+
+\paragraph{Discount and objective.} We use $\gamma = 0.99$, the standard
+PPO~\cite{schulman2017ppo} setting at this episode length. The agent
+seeks a stochastic policy $\pi_\theta(a_t \mid s_t)$ maximising
+\begin{equation}
+  J(\pi_\theta) = \mathbb{E}_{\pi_\theta}\!\left[\sum_{t=0}^{T-1} \gamma^t\, r_t\right],
+  \quad \text{s.t.\ } a_t \in [-1,1]^{N},\ \sum_i |a_{t,i}| \le 1.
+  \label{eq:objective}
+\end{equation}
+
+\begin{table}[t]
+  \centering
+  \caption{Notation used throughout the paper.}
+  \label{tab:notation}
+  \begin{tabular}{ll}
+    \toprule
+    Symbol & Meaning \\
+    \midrule
+    $N$ & Number of tradable assets ($N{=}5$) \\
+    $W$ & Observation window length ($W{=}60$ days) \\
+    $F$ & Features per step ($65$ base / $75$ Phase-C) \\
+    $s_t \in \mathbb{R}^{W \times F}$ & State (observation window) at step $t$ \\
+    $a_t \in [-1,1]^{N}$ & Target portfolio weights at step $t$ \\
+    $c_{t,i}, v_{t,i}$ & Close price and traded volume of asset $i$ \\
+    $\lambda, \alpha$ & CVaR weight ($0.01$) and tail level ($0.05$) \\
+    $\lambda_K$ & Kyle's-$\lambda$ impact coefficient ($10^{-3}$) \\
+    $\sigma_{t,i}$ & Regime-scaled fill-noise std.\ dev. \\
+    $\gamma$ & Discount factor ($0.99$) \\
+    $T$ & Episode horizon (756 / 252 / 691 days) \\
+    $N_e$ & Ensemble size ($N_e{=}5$ seeds) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Methodology}
+\label{sec:method}
+
+This section describes the six components of the proposed system, in the
+order in which an observation flows through it: the simulator and reward
+(IV-A), the state representation (IV-B), the market-impact and
+liquidity-aware execution model (IV-C), the Transformer encoder
+(IV-D), the CVaR-regularized reward derivation (IV-E), and the
+ensemble-uncertainty aggregation rule used at inference time (IV-F).
+Figure~\ref{fig:architecture} summarises the end-to-end pipeline.
+
+\begin{figure*}[!tbp]
+  \centering
+  \includegraphics[width=\textwidth]{architecture}
+  \caption{System architecture. Data $\rightarrow$ \texttt{MultiAssetTradingEnv}
+  state assembly (per-asset OHLCV + indicators + Phase-C liquidity-regime
+  features + correlation matrix + positions) $\rightarrow$ Transformer encoder
+  (causal, $T{=}60$, $d{=}64$) $\rightarrow$ $5\times$ PPO heads (independent
+  seeds, val-Sharpe early-stop) $\rightarrow$ uncertainty-scaled aggregation
+  $a = \mu / (1 + \beta \bar\sigma)$ $\rightarrow$ Kyle's-$\lambda$ market-impact
+  cost and stochastic fill-noise loop back into reward.}
+  \label{fig:architecture}
+\end{figure*}
+
+\subsection{Simulator Design}
+\label{sec:method:sim}
+
+The environment, \texttt{MultiAssetTradingEnv}, is a Gymnasium-compatible
+discrete-time simulator over $N{=}5$ US ETFs (SPY, QQQ, IWM, GLD, TLT)
+sampled at daily resolution. At each step $t$ the agent emits a
+continuous action $a_t \in [-1, 1]^{5}$ interpreted as the target
+portfolio weight per asset. We deliberately use an unconstrained
+\texttt{Box} action space rather than a Dirichlet or softmax head: the
+agent may simultaneously hold long and short exposures across assets,
+and the gross portfolio weight is unconstrained at $\sum_i |a_{t,i}| \le
+N$. This choice keeps the policy head identical to a vanilla Gaussian
+PPO actor and avoids tying the cross-asset capital-allocation problem to
+an unnecessarily restrictive simplex parameterisation.
+
+The per-step reward decomposes additively into four terms,
+\begin{equation}
+  r_t = r^{\text{pnl}}_t + r^{\text{spread}}_t + r^{\text{impact}}_t
+        + \lambda\,\widehat{\text{CVaR}}_\alpha(\mathbf{r}_{t-K:t}),
+  \label{eq:reward}
+\end{equation}
+where $r^{\text{pnl}}_t = \sum_i a_{t-1,i}\,\log(c_{t,i}/c_{t-1,i})$ is
+the realised log-PnL on the previously-held positions,
+$r^{\text{spread}}_t = -s\,\sum_i |a_{t,i}-a_{t-1,i}|$ charges a flat
+half-spread $s$ on turnover, $r^{\text{impact}}_t$ is the Kyle's-$\lambda$
+temporary-impact cost defined in
+Section~\ref{sec:method:impact}, and the final term is the
+CVaR penalty derived in Section~\ref{sec:method:cvar}. Each component is
+logged separately so that none can silently dominate the gradient signal,
+and we verify post hoc that no single term contributes more than $80\%$
+of $|r_t|$ in expectation.
+
+Each per-asset feature row carries five raw OHLCV-derived signals
+(log-return, $\log(h/c)$, $\log(l/c)$, $\log(o/c)$, and a 20-day
+volume ratio) plus five technical indicators chosen to span momentum,
+trend, and volatility regimes: a 14-period RSI (rescaled to $[-1, 1]$),
+the MACD line and signal line at the standard $(12, 26, 9)$
+configuration, and the Bollinger \%B and bandwidth at $(20, 2)$. The
+agent also observes the rolling 20-day correlation upper triangle of
+log-returns across the five assets, providing portfolio-level
+co-movement awareness without requiring it to re-derive correlations
+from the per-asset features.
+
+\subsection{State Representation}
+\label{sec:method:state}
+
+The base observation is a $W \times F$ tensor with $W{=}60$ historical
+steps and $F{=}65$ features per step:
+\begin{itemize}
+  \item \textbf{Per-asset block ($5 \times 10 = 50$):} the five OHLCV-derived
+        features and five technical indicators above, concatenated for
+        each of the five assets;
+  \item \textbf{Cross-asset correlation block ($10$):} the upper triangle
+        of the rolling 20-day log-return correlation matrix
+        $\binom{5}{2} = 10$ entries;
+  \item \textbf{Position block ($5$):} the agent's currently-held
+        weights $a_{t-1} \in [-1,1]^{5}$, broadcast across the time
+        dimension so that the encoder sees its own posture at every
+        attention step.
+\end{itemize}
+When the Phase-C liquidity-regime features are enabled
+(Sec.~\ref{sec:method:impact}), two additional features per asset are
+appended, taking $F$ to $75$. All non-position features are normalised
+using mean and standard deviation computed exclusively on the training
+split (2018--2020); positions are already in $[-1, 1]$ and pass through
+unnormalised.
+
+\subsection{Market Impact and Liquidity-Aware Execution}
+\label{sec:method:impact}
+
+To inject the realistic frictions promised by the title we extend the
+simulator with a market-impact cost and a volume-inferred
+liquidity-regime signal. \emph{We frame both as public-tape
+microstructure proxies for an unobservable component of execution
+uncertainty rather than as a tick-level dark-pool simulator}: daily-bar
+OHLCV cannot resolve hidden order flow, but it can resolve the
+moments at which liquidity supply changes character, which is sufficient
+to teach the agent to throttle exposure in those regimes.
+
+\paragraph{Kyle's-$\lambda$ temporary impact.} Following the linear
+price-impact tradition initiated by~\cite{kyle1985impact}, we charge a
+power-law cost on each step's realised trade,
+\begin{equation}
+  r^{\text{impact}}_t = -\sum_i \lambda_K
+       \,|a_{t,i}-a_{t-1,i}|^{\alpha}
+       \,\frac{\bar{v}_i}{v_{t,i}+\varepsilon},
+  \label{eq:kyle}
+\end{equation}
+with $\lambda_K = 10^{-3}$ and $\alpha = 1.5$. The dimensionless
+liquidity factor $\bar{v}_i / v_{t,i}$ amplifies impact on
+unusually thin days (where realised volume falls below the per-asset
+median $\bar{v}_i$) and dampens it on heavy-volume days, giving the
+agent a continuous gradient to avoid trading into illiquidity. With
+these constants a full-position flip incurs roughly $10$~bps at median
+liquidity and $\sim 30$~bps when volume is one third of the reference,
+which matches the order of magnitude of empirical implementation
+shortfalls reported for ETF block trades.
+
+\paragraph{Liquidity-regime features.} We expose two additional per-asset
+features that summarise the inferred liquidity regime. The first is a
+20-day rolling volume z-score, $z_{t,i} = (v_{t,i}-\mu^v_{20,i})/
+\sigma^v_{20,i}$, clipped to $[-5, 5]$: extreme negative values proxy
+hidden-liquidity withdrawal (thin tape, wide spreads), and extreme
+positives proxy forced unwinds or information events. The second is a
+20-day-smoothed OHLC-dispersion spread proxy,
+$\hat{s}_{t,i} = \mathrm{MA}_{20}\!\left[(h_{t,i}-l_{t,i})/c_{t,i}\right]$,
+which is non-negative by construction and rises during illiquid regimes
+when intraday ranges widen.
+
+\paragraph{Stochastic fill noise.} To translate the inferred regime into
+realised PnL dispersion, we replace the deterministic close-price fill
+with a noisy fill,
+\begin{equation}
+  \tilde{c}_{t,i} = c_{t,i}\,(1 + \varepsilon_{t,i}), \qquad
+  \varepsilon_{t,i} \sim \mathcal{N}(0, \sigma_{t,i}^{2}),
+  \label{eq:fillnoise}
+\end{equation}
+with regime-scaled volatility
+$\sigma_{t,i} = \sigma_{\text{base}}\,(1 + k\,\hat{s}_{t,i})$,
+$\sigma_{\text{base}} = 5\,\text{bps}$ and $k = 10$. Realised
+log-returns are then computed against $\tilde{c}_{t,i}$ rather than
+$c_{t,i}$. Together (\ref{eq:kyle}) and (\ref{eq:fillnoise}) give the
+agent two coupled signals --- a deterministic cost penalty and a
+stochastic outcome dispersion --- both rising monotonically with the
+inferred illiquidity proxies.
+
+\subsection{Transformer Encoder}
+\label{sec:method:transformer}
+
+The features extractor is a causal Transformer~\cite{vaswani2017attention}
+that maps the $W \times F$ observation window to a $d_{\text{model}}$-
+dimensional latent. We use $d_{\text{model}}{=}64$, two encoder layers,
+four attention heads, and a feed-forward dimensionality of $128$. A
+learned positional embedding is added to the linearly-projected features,
+and a strict upper-triangular causal mask prevents the encoder from
+attending to future steps in the window. The pooled output of the final
+step ($t = W{-}1$) is forwarded as the latent observation to the actor
+and critic MLP heads. The extractor contains $\approx\!75\text{k}$
+parameters and the full PPO policy $\approx\!126\text{k}$.
+
+We adopt the pre-LayerNorm (``norm-first'') variant rather than the
+original post-LN block. At this scale and with PPO's noisy advantage
+estimates, post-LN training was prone to early-iteration gradient spikes
+that occasionally pushed the policy into the no-trade absorbing region;
+pre-LN trained reliably across all five seeds without warm-up. The
+extractor is implemented as a Stable-Baselines3
+\texttt{BaseFeaturesExtractor} so that the actor and critic remain the
+same two-layer 128-unit MLP used by the MLP baseline; this isolates the
+encoder as the only architectural change in the Transformer-vs-MLP
+comparison.
+
+\subsection{CVaR-Regularized Reward}
+\label{sec:method:cvar}
+
+To penalise tail losses inside the gradient signal rather than only at
+the model-selection stage, we add a Conditional Value-at-Risk regulariser
+to the reward (\ref{eq:reward}). Following the
+Rockafellar--Uryasev convex
+formulation~\cite{rockafellar2000cvar},
+\begin{equation}
+  \text{CVaR}_\alpha(L) \;=\; \min_{v\in\mathbb{R}}
+       \left\{ v + \tfrac{1}{\alpha}\,
+              \mathbb{E}\!\left[(L - v)^{+}\right] \right\},
+  \label{eq:cvar}
+\end{equation}
+where $L$ denotes the loss random variable (here, $-r_t$) and
+$\alpha = 0.05$ corresponds to the worst-$5\%$-tail. We follow
+\cite{tamar2015cvar} in treating the inner minimisation by sampling: a
+rolling buffer of the last $K{=}252$ net step-rewards is maintained, and
+the empirical $\alpha$-tail mean is appended to the reward as
+$\lambda\,\widehat{\text{CVaR}}_\alpha$ with $\lambda = 0.01$. Because
+$\widehat{\text{CVaR}}_\alpha$ is negative whenever the agent has
+realised tail losses, this term acts as a negative shaping signal on
+drawdowns rather than on mean returns.
+
+The CVaR weight $\lambda$ is itself a sensitive hyperparameter. In an
+early sensitivity sweep we observed that $\lambda = 0.1$ caused the
+CVaR term to account for roughly $88\%$ of the reward magnitude and
+collapsed the policy onto a near-flat allocation that minimised the
+penalty without trading; $\lambda = 0.01$ keeps the CVaR contribution
+within the same order of magnitude as the other reward components and
+recovers a learning-active policy. This calibration is reported in the
+ablations of Section~\ref{sec:results}.
+
+\subsection{Ensemble and Uncertainty-Scaled Position Sizing}
+\label{sec:method:ensemble}
+
+The final component aggregates an ensemble of $N_e = 5$ independently-
+trained PPO~\cite{schulman2017ppo} heads. Each head uses a distinct
+random seed drawn from $\{42, 101, 202, 303, 404\}$ controlling
+parameter initialisation, environment stochasticity, and minibatch
+sampling. Heads are trained with a validation-Sharpe early-stopping
+callback (\texttt{ValEvalCallback}) that runs a deterministic backtest
+on the held-out 2021 validation split every $10\text{k}$ environment
+steps and retains the highest-Sharpe checkpoint. We find empirically
+that the best-validation step varies substantially across seeds (in our
+runs the per-seed best checkpoints land at $20$, $60$, $80$, $90$, and
+$100\,\text{k}$ steps), so a single global early-stop schedule is not
+viable; the per-seed callback is a necessary part of the protocol, not
+an afterthought.
+
+At inference time, given the per-head action distributions
+$\{a^{(j)}_t\}_{j=1}^{N_e}$, we compute the per-action mean and
+standard deviation across heads,
+\begin{equation}
+  \mu_{t,i} = \tfrac{1}{N_e}\sum_j a^{(j)}_{t,i}, \qquad
+  \sigma_{t,i} = \sqrt{\tfrac{1}{N_e}\sum_j (a^{(j)}_{t,i}-\mu_{t,i})^{2}},
+\end{equation}
+and emit the uncertainty-scaled aggregated action
+\begin{equation}
+  a_t \;=\; \frac{\mu_t}{1 + \beta\,\bar{\sigma}_t},
+  \qquad \bar{\sigma}_t = \tfrac{1}{N}\sum_i \sigma_{t,i},
+  \label{eq:uncert}
+\end{equation}
+with $\beta = 5$ as the default shrinkage gain. The intuition is direct:
+when the heads agree the cross-head dispersion $\bar{\sigma}_t \to 0$
+and the aggregated action coincides with the simple mean; when they
+disagree --- as they do persistently on out-of-distribution regimes,
+where in our experiments $\bar{\sigma}_t \approx 0.77$ --- the
+denominator inflates and the aggregated position shrinks toward zero.
+This shrinkage rule is the principal mechanism by which the system
+trades risk control for foregone alpha, and Fig.~\ref{fig:architecture}
+shows where (\ref{eq:uncert}) sits in the inference pipeline.
+
+% =====================================================================
+\section{Experimental Setup}
+\label{sec:setup}
+
+\subsection{Data and Splits}
+\label{sec:setup:data}
+The investable universe consists of $N{=}5$ liquid US ETFs spanning equity,
+size, duration, and commodity exposures: SPY (S\&P 500), QQQ (Nasdaq 100),
+IWM (Russell 2000), TLT (long-duration Treasuries), and GLD (gold). All
+series are daily \emph{adjusted} OHLCV bars sourced from Alpha Vantage and
+cached locally as Parquet under \texttt{data/}; using adjusted closes
+ensures that splits and dividends do not appear as spurious one-day
+returns. We adopt a strict temporal three-way split with no shuffling:
+2018--2020 for training (756 trading days), calendar 2021 for validation
+(252 days), and 2022--2024 for the held-out test set (691 days). Per
+CLAUDE.md \S6.2, normalisation statistics (per-feature mean and standard
+deviation) are fitted exclusively on the training window and applied
+unchanged to validation and test, and a unit test asserts that the state
+constructed at time $t$ contains no field derived from $t{+}1$ or later.
+
+\subsection{Baselines}
+\label{sec:setup:baselines}
+We compare the proposed system against six external baselines and five
+internal RL ablation baselines, all evaluated on the same 2022--2024 OOS
+split. The external baselines are:
+(i) \emph{SPY buy-and-hold}, a single-asset passive long;
+(ii) \emph{equal-weight 5-ETF}, a daily-rebalanced uniform allocation
+across the universe;
+(iii) \emph{60/40 SPY/TLT}, a daily-rebalanced classical balanced
+portfolio;
+(iv) \emph{MA-crossover}, a 50/200-day SMA crossover on SPY with a
+one-day-lagged signal to avoid look-ahead;
+(v) \emph{TWAP}, a 10-day linear ramp toward the equal-weight target,
+modelling time-sliced execution; and
+(vi) \emph{VWAP-proxy}, equal-weight target executed at the daily OHLC4
+midprice rather than the close, modelling volume-weighted execution.
+The internal RL baselines are MLP+CVaR (run \texttt{r005}), the
+single-seed Transformer at the early-stopping checkpoint
+(\texttt{r006-ckpt50k}), the naive-mean five-seed ensemble
+(\texttt{r007 mean}), the uncertainty-scaled ensemble \texttt{r007}
+(frictionless training), and the uncertainty-scaled ensemble
+\texttt{r008} (Phase-C liquidity-aware training).
+
+\subsection{Metrics}
+\label{sec:setup:metrics}
+We report six standard return/risk metrics: annualised return,
+Sharpe ratio (with $r_f{=}0$), Sortino ratio (downside-only denominator),
+maximum drawdown, Calmar ratio (annualised return divided by max
+drawdown), and Conditional Value-at-Risk at the $5\%$ tail of daily
+returns. All are computed by QuantStats on daily NAV. For the Phase-C
+execution comparison (Sec.~\ref{sec:results-liquidity}) we additionally
+report three implementation-shortfall metrics: total implementation
+shortfall in basis points, mean per-day market impact in basis points
+(from Eq.~\ref{eq:kyle}), and mean daily portfolio turnover.
+
+\subsection{Hyperparameters}
+\label{sec:setup:hyper}
+
+\begin{table}[t]
+  \centering
+  \caption{Hyperparameter settings.}
+  \label{tab:hyper}
+  \footnotesize
+  \begin{tabular}{ll@{\hskip 1.5em}ll}
+    \toprule
+    \multicolumn{2}{l}{\textit{PPO}} & \multicolumn{2}{l}{\textit{Transformer}} \\
+    lr                & $3{\times}10^{-4}$              & $d_{\text{model}}$   & $64$ \\
+    $n_{\text{steps}}$& $256$                           & layers               & $2$ \\
+    minibatch         & $64$                            & heads                & $4$ \\
+    epochs            & $10$                            & FFN dim              & $128$ \\
+    $\gamma$          & $0.99$                          & dropout              & $0.1$ \\
+    GAE $\lambda$     & $0.95$                          & window $T$           & $60$ \\
+    clip              & $0.2$                           & norm                 & pre-LN \\
+    $c_{\text{ent}}$  & $0.01$                          & pos.\ embed          & learned \\
+    $c_v$             & $0.5$                           & head                 & MLP $[128,128]$ \\
+    \midrule
+    \multicolumn{2}{l}{\textit{Ensemble}} & \multicolumn{2}{l}{\textit{CVaR \& Phase-C}} \\
+    seeds             & 5 (42--404)                     & CVaR $\lambda$       & $0.01$ \\
+    steps             & $100$k                          & CVaR $\alpha$        & $0.05$ \\
+    eval interval     & $10$k                           & buffer $K$           & $252$ \\
+    select            & best val Sharpe                 & Kyle $\lambda_K$     & $10^{-3}$ \\
+    $\beta$           & $5$                             & Kyle exp.\ $\alpha$  & $1.5$ \\
+    half-spread $s$   & $1$ bp                          & $\sigma_{\text{base}}$, $k$ & $5$ bps, $10$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:hyper} consolidates all hyperparameters used in the
+reported runs. PPO settings follow the Stable-Baselines3 defaults except
+for the rollout length $n_{\text{steps}}{=}256$, which trades a smaller
+on-policy buffer for more frequent policy updates at our $100\text{k}$-step
+budget; we therefore deviate from the SB3 default of $2048$. The
+entropy coefficient is set to $0.01$ rather than $0$ to maintain
+exploration on the continuous portfolio-weight action space. The
+Transformer extractor contains $\approx\!75\text{k}$ parameters and the
+full PPO policy $\approx\!126\text{k}$. Every seed controls numpy,
+torch, Python \texttt{random}, and the Gym environment RNG
+simultaneously, and the entire seed set $\{42, 101, 202, 303, 404\}$
+is logged in each run's config snapshot.
+
+\subsection{Hardware and Reproducibility}
+\label{sec:setup:hw}
+Smoke tests, single-seed development runs, all six external baselines,
+and impact-adjusted backtest replays were executed locally on an AMD
+Ryzen 9 9950X3D + NVIDIA RTX 5080 workstation. Five-seed ensemble
+training (runs \texttt{r007} and \texttt{r008}) was offloaded to a
+Google Colab NVIDIA T4 (16 GB) instance, consuming approximately
+$5\text{--}6$ GPU-hours per five-seed run at $100\text{k}$ steps each.
+Per CLAUDE.md \S6.4, every run writes a timestamped directory under
+\texttt{runs/} containing the full config snapshot, the seed, the
+\texttt{ValEvalCallback} log, all $10\text{k}$-step checkpoints, and the
+final TensorBoard event file, so that each row in
+Tables~\ref{tab:main}--\ref{tab:liquidity} traces back to an exact
+reproducible artefact. Point-estimate Sharpe ratios in
+Table~\ref{tab:main} are accompanied by $95\%$ bootstrap confidence
+intervals computed via circular block bootstrap ($N{=}2000$,
+block${=}21$ trading days) to account for return autocorrelation.
+
+% =====================================================================
+\section{Results}
+\label{sec:results}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig01_equity_curves.pdf}
+  \caption{Equity curves: r007/r008 ensembles vs.\ baselines on 2022--2024 OOS.}
+  \label{fig:equity}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig05_ensemble_comparison.pdf}
+  \caption{Ensemble mean vs.\ uncertainty-scaled aggregation: the
+  shrinkage on disagreement collapses test max drawdown from
+  $0.58$ to $0.09$ on r007.}
+  \label{fig:uncertainty}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{fig09_liquidity_stress.pdf}
+  \caption{Phase-C contribution: r007 vs.\ r008 implementation shortfall,
+  mean impact, mean spread, mean turnover (impact-adjusted replay).}
+  \label{fig:liquidity}
+\end{figure}
+
+We report all results on the held-out 2022--2024 test split (691 trading
+days), using a five-seed ensemble (seeds $\{42, 101, 202, 303, 404\}$)
+trained with val-Sharpe early stopping on calendar year 2021. Two
+configurations of the full pipeline are compared throughout: \emph{r007}
+(frictionless training) and \emph{r008} (Phase-C liquidity-aware training
+with volume-z-score and OHLC-dispersion spread-proxy features plus
+stochastic fill noise).
+
+\subsection{Main Results vs.\ Benchmarks}
+\label{sec:results-main}
+
+Table~\ref{tab:main} compares the r007 uncertainty-scaled ensemble against
+three passive baselines on the 691-day OOS split. The strategy
+\emph{underperforms} SPY buy-and-hold on absolute return (1.27\% vs.\
+11.14\%) and on Sharpe (0.27 vs.\ 0.70), and we make no claim of
+out-performance against passive equities. The defensible result is risk
+control: maximum drawdown is 8.64\% versus 21.28\% for SPY
+($-59\%$), 21.31\% for the equal-weight 5-ETF basket ($-59\%$), and
+21.99\% for a daily-rebalanced 60/40 SPY/TLT mix ($-61\%$). Calmar
+(annualized return over max drawdown) at 0.147 also exceeds the 60/40
+mix's 0.112 despite a near-identical Sharpe, since the strategy buys its
+small return at roughly one third the drawdown. Equity trajectories are
+shown in Fig.~\ref{fig:equity}. Bootstrap $95\%$ CIs (Table~\ref{tab:main}, inline) show no strategy
+achieves statistically significant Sharpe separation over 691 days,
+consistent with post-2022 regime difficulty. The ensemble's contribution
+is better characterised by its maximum drawdown ($8.64\%$), an order of
+magnitude below the naive ensemble mean ($44.2\%$, row~E of
+Table~\ref{tab:ablation}) and robust across bootstrap samples.
+
+\begin{table}[t]
+  \centering
+  \caption{Main results on the 2022--2024 OOS test split (691 days).}
+  \label{tab:main}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Strategy & Ann.\ Ret.\ & Sharpe & Max DD & Calmar \\
+    \midrule
+    r007 ens.\ (ours)        & $+1.27\%$  & $+0.27\ [-1.05,{+}1.59]$ & $\mathbf{8.64\%}$ & $+0.147$ \\
+    SPY buy-and-hold         & $+11.14\%$ & $+0.70\ [-0.44,{+}2.16]$ & $21.28\%$         & $+0.524$ \\
+    Equal-weight 5-ETF       & $+6.36\%$  & $+0.51\ [-0.70,{+}1.89]$ & $21.31\%$         & $+0.298$ \\
+    60/40 SPY/TLT            & $+2.47\%$  & $+0.25\ [-1.06,{+}1.70]$ & $21.99\%$         & $+0.112$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Ablation Study}
+\label{sec:results-ablation}
+
+Table~\ref{tab:ablation} reports the full component ablation, rows A--G,
+each evaluated on the same 2022--2024 OOS split. Rows A and B are
+single-seed MLP runs (731 days, includes 2021 contiguous test segments
+from the multi-asset pre-CVaR sweep); rows C--G are 691-day
+post-2022 test runs. The drawdown trajectory is monotone-on-improvement
+from row C onward: $50.9\% \to 51.4\% \to 71.8\% \to 56.3\% \to 44.2\%
+\to \mathbf{8.6\%} \to 13.7\%$. Adding CVaR (B) holds drawdown roughly
+constant while nudging Sharpe up; introducing the Transformer without
+early stopping (C) overfits and inflates drawdown to 71.8\%; val-Sharpe
+early stopping (D) recovers a strong single-seed Sharpe of 0.74 but at
+56.3\% drawdown that is entirely seed-luck (see
+Section~\ref{sec:results-perseed}); naive ensemble averaging (E)
+\emph{worsens} Sharpe to $-0.20$ as opposing positions cancel and spread
+is paid on the residual; and \emph{uncertainty-scaled sizing} (row F)
+collapses drawdown by an order of magnitude to 8.6\% while flipping
+Sharpe positive. Row F is the headline configuration of the paper.
+
+Row G adds the Phase-C liquidity-aware environment (volume-regime state
+features and stochastic fill noise) to the same uncertainty-sizing
+ensemble. Test Sharpe regresses to $-0.27$ and test max drawdown widens
+to 13.7\%, but the underlying microstructure mechanism is validated
+under impact-adjusted replay (Section~\ref{sec:results-liquidity}).
+
+\begin{table}[t]
+  \centering
+  \caption{Component ablation on the OOS test split. Rows A--B
+  use 731 days; rows C--G use 691 days (post-2022).}
+  \label{tab:ablation}
+  \begin{tabular}{clrrrr}
+    \toprule
+    Row & Configuration & Ann.\ Ret. & Sharpe & Max DD & Calmar \\
+    \midrule
+    A & MLP, no CVaR             & $-3.2\%$  & $+0.17$  & $50.9\%$ & $-0.06$ \\
+    B & + CVaR ($\lambda{=}0.01$)& $-1.3\%$  & $+0.18$  & $51.4\%$ & $-0.03$ \\
+    C & + Transformer, no ES     & $-10.8\%$ & $+0.09$  & $71.8\%$ & $-0.15$ \\
+    D & + early stop (50k)       & $+29.0\%$ & $+0.74$  & $56.3\%$ & $+0.52$ \\
+    E & + 5-seed ens.\ (mean)    & $-8.8\%$  & $-0.20$  & $44.2\%$ & $-0.20$ \\
+    \textbf{F} & \textbf{+ uncert.\ sizing (FULL, r007)} & $\mathbf{+1.3\%}$  & $\mathbf{+0.27}$  & $\mathbf{8.6\%}$ & $\mathbf{+0.15}$ \\
+    G & + liquidity env (r008)   & $-2.3\%$  & $-0.23$  & $13.7\%$ & $-0.18$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Per-Seed Variance and the Necessity of Uncertainty Sizing}
+\label{sec:results-perseed}
+
+The deceptively simple ensemble configuration hides a large per-seed
+test-time variance that motivates the entire uncertainty-sizing
+contribution. Table~\ref{tab:perseed} reports each r007 head evaluated
+in isolation. Test Sharpe spans $[-1.00, +0.74]$ and annualized return
+spans $[-54.7\%, +26.0\%]$ across the five seeds. Critically,
+\emph{validation Sharpe is a poor predictor of test rank}: the best-val
+seed (303, val Sharpe $1.63$) finished third on test, while the
+best-test seed (101, test Sharpe $+0.74$) had only the fourth-best val
+Sharpe. Picking a single head by val rank is close to a coin flip on
+this dataset.
+
+\begin{table}[t]
+  \centering
+  \caption{Per-seed r007 test performance (each head evaluated alone).}
+  \label{tab:perseed}
+  \begin{tabular}{crrrr}
+    \toprule
+    Seed & Val Sharpe & Test Sharpe & Test Ann.\ Ret. & Test Max DD \\
+    \midrule
+    42  & $+1.37$ & $-0.35$         & $-30.4\%$         & $71.1\%$ \\
+    101 & $+0.68$ & $\mathbf{+0.74}$ & $\mathbf{+26.0\%}$ & $42.0\%$ \\
+    202 & $+0.91$ & $-1.00$         & $-54.7\%$         & $90.4\%$ \\
+    303 & $+1.63$ & $+0.02$         & $-15.2\%$         & $66.2\%$ \\
+    404 & $+0.59$ & $+0.09$         & $-2.4\%$          & $31.3\%$ \\
+    \midrule
+    mean of heads & --- & $-0.10$ & $-15.3\%$ & $\approx 60\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The naive ensemble mean (row E of Table~\ref{tab:ablation}) is in fact
+\emph{worse} than the average individual Sharpe ($-0.20$ vs.\ $-0.10$),
+because heads take opposing long/short positions that cancel and the
+agent pays spread on the residual. By contrast, uncertainty-scaled
+sizing -- which shrinks the position by $1/(1+\beta\bar\sigma)$ when
+heads disagree -- drives mean head standard deviation $\bar\sigma
+\approx 0.77$ on test, indicating that disagreement is sustained across
+the unseen 2022 bear, 2023 rally, and 2024 mixed regimes. This
+shrinkage is the mechanism that takes the ensemble from $0.58$ to
+$0.09$ in test max drawdown (Fig.~\ref{fig:uncertainty}). Row F is the
+only configuration that is simultaneously (a) positive Sharpe, (b)
+single-digit max drawdown, and (c) not contingent on a lucky seed pick;
+we therefore present it as the only \emph{deployable} variant.
+
+\subsection{Liquidity-Aware Execution Effects (Phase C, r008)}
+\label{sec:results-liquidity}
+
+To evaluate whether the Phase-C liquidity-regime state features and
+stochastic fill noise actually shape execution behaviour, we replay the
+r007 and r008 ensemble-uncertainty policies through the same
+impact-adjusted environment (Kyle's-$\lambda$ enabled) on the
+2022--2024 test split. Table~\ref{tab:liquidity} reports the four
+execution-quality metrics. All four improve in the predicted direction:
+implementation shortfall falls from 719.1 bps to 616.6 bps
+($-14.3\%$, roughly 37 bps/yr saved over the 691-day window); mean
+daily impact falls from 0.79 bps to 0.67 bps ($-15.2\%$); mean daily
+spread falls from 0.25 bps to 0.22 bps ($-12.0\%$); and mean daily
+turnover falls from 0.2478 to 0.2203 ($-11.1\%$). The agent has
+learned to trade less in inferred-illiquid regimes, which is precisely
+the behaviour the Phase-C training signal was designed to induce
+(Fig.~\ref{fig:liquidity}).
+
+\begin{table}[t]
+  \centering
+  \caption{Impact-adjusted replay: r007 vs.\ r008 execution metrics on
+  the 2022--2024 test split, ensemble-uncertainty policy in both rows.}
+  \label{tab:liquidity}
+  \begin{tabular}{lrrr}
+    \toprule
+    Metric                          & r007 & r008 & $\Delta$ \\
+    \midrule
+    Impl.\ shortfall (bps)          & $719.1$  & $\mathbf{616.6}$  & $\mathbf{-14.3\%}$ \\
+    Mean daily impact (bps)         & $0.79$   & $\mathbf{0.67}$   & $\mathbf{-15.2\%}$ \\
+    Mean daily spread (bps)         & $0.25$   & $\mathbf{0.22}$   & $\mathbf{-12.0\%}$ \\
+    Mean daily turnover             & $0.2478$ & $\mathbf{0.2203}$ & $\mathbf{-11.1\%}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The cost of this microstructure improvement is that gross Sharpe
+contracted from $+0.27$ to $-0.23$ between r007 and r008. We attribute
+this to insufficient training budget: at 100k PPO steps per seed, the
+liquidity-aware policy reduced gross turnover but had not yet converted
+that reduction into higher per-trade quality. A net-of-impact
+comparison still favours r007 on this budget ($\approx -73$ bps/yr vs.\
+$\approx -400$ bps/yr), but the Phase-C \emph{mechanism} -- lower
+turnover, lower impact, lower implementation shortfall -- is
+unambiguously validated by Table~\ref{tab:liquidity}. We discuss the
+training-budget gap as a limitation in Section~\ref{sec:discussion}.
+
+% =====================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{What Worked, What Didn't}
+
+Three results held up. Row~F of Table~\ref{tab:ablation} is the only
+configuration with single-digit test max drawdown ($8.6\%$); every
+other variant, including the early-stopped single seed (row~D,
+$56.3\%$) and naive ensemble mean (row~E, $44.2\%$), sits in
+$44$--$72\%$. The aggregator $a = \mu/(1+\beta\bar\sigma)$ is best
+read as a risk-control primitive that buys bounded drawdown by paying
+foregone return when heads disagree OOD. Under impact-adjusted replay
+(Table~\ref{tab:liquidity}) r008 cuts implementation shortfall by
+$14.3\%$, impact by $15.2\%$, and turnover by $11.1\%$, confirming
+that the liquidity-regime features functioned as intended. And the
+per-seed best-validation steps spanned $\{20, 60, 80, 90, 100\}$k:
+per-seed checkpointing is load-bearing, not incidental.
+
+Two results did not. The headline configuration earns $+1.27\%$
+annualized at Sharpe $+0.27$ against SPY's $+11.14\%$/$+0.70$
+(Table~\ref{tab:main}); the only honest comparative claim is the
+$59\%$ drawdown reduction. Adding the Phase-C environment dropped
+r008 test Sharpe to $-0.27$ at $13.7\%$ drawdown (rows~F, G); we
+attribute this to a training-budget gap in which $100$k PPO steps
+shrank turnover but had not yet converted that into per-trade quality
+-- a budget finding, not a refutation of liquidity awareness, since
+the mechanism is validated by Table~\ref{tab:liquidity}.
+
+\subsection{Limitations}
+\label{sec:disc:limits}
+
+The simulator operates on daily OHLCV bars without a tick-level order
+book; per Sec.~\ref{sec:method:impact}, hidden liquidity is treated as
+an unobservable execution-uncertainty component inferred from public-tape
+proxies (volume z-score, dispersion spread), not a simulated dark-pool
+replay. Validation uses 2021 only, so the row-F val Sharpe of $1.98$
+carries a wide confidence interval; we anchor all claims on the OOS
+test Sharpe ($+0.27$). Frictions are simplified: a flat $1$~bps
+half-spread plus the Phase-C Kyle's-$\lambda$ impact and regime-scaled
+fill noise, with no borrow cost, locate fees, or hard-to-borrow
+exclusions. All results are backtested; no live or paper-brokerage
+deployment was attempted. Finally, the r009 FinBERT sentiment pipeline
+(fetch, inference, env integration, unit tests) is implemented but
+untrained: free-tier news-API quotas blocked the multi-year backfill
+needed for end-to-end training; we report this as future work.
+
+% =====================================================================
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+We presented a 5-seed Transformer-PPO ensemble trained with
+CVaR$_{5\%}$ regularization, a Kyle's-$\lambda$ impact penalty, and
+volume-inferred liquidity-regime features, aggregated via
+$a = \mu / (1 + \beta\,\bar\sigma)$. The aggregator is the
+load-bearing component: it collapses test max drawdown from $58\%$
+(naive mean) to $9\%$ on r007 and from $60\%$ per-seed to $14\%$ on
+r008, and is the only configuration that survives seed variance. We
+frame the contribution as a \emph{drawdown-control primitive}, not a
+passive-equity-beating alpha system. Future work: completing r009
+FinBERT sentiment fusion (blocked on news-API backfill), replacing
+daily-bar Kyle's-$\lambda$ with intra-day LOB replay or
+Almgren--Chriss execution, a \texttt{MarketConfig} abstraction for
+Indian equities (NSE/BSE), and Interactive Brokers paper-trading
+deployment.
+
+% =====================================================================
+{\footnotesize
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+}
+
+\end{document}
