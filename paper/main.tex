@@ -269,9 +269,11 @@ $\varepsilon_{t,i} \sim \mathcal{N}(0, \sigma_{t,i}^{2})$ of
 
 \paragraph{Reward.} The per-step reward decomposes additively as
 \begin{equation}
-  r_t = \Delta\mathrm{PnL}_t \;-\; c_{\text{spread}}(a_t, a_{t-1})
-        \;-\; c_{\text{impact}}(a_t, a_{t-1};\, v_t)
-        \;-\; \lambda\,\widehat{\mathrm{CVaR}}_\alpha(\hat L_t),
+  \begin{split}
+    r_t = \Delta\mathrm{PnL}_t &- c_{\text{spread}}(a_t, a_{t-1}) \\
+          &- c_{\text{impact}}(a_t, a_{t-1};\, v_t)
+           - \lambda\,\widehat{\mathrm{CVaR}}_\alpha(\hat L_t),
+  \end{split}
   \label{eq:reward-mdp}
 \end{equation}
 where $\Delta\mathrm{PnL}_t = \sum_i a_{t-1,i}\,\log(c_{t,i}/c_{t-1,i})$
@@ -357,11 +359,12 @@ PPO actor and avoids tying the cross-asset capital-allocation problem to
 an unnecessarily restrictive simplex parameterisation.
 
 The per-step reward decomposes additively into four terms,
-\begin{equation}
-  r_t = r^{\text{pnl}}_t + r^{\text{spread}}_t + r^{\text{impact}}_t
-        + \lambda\,\widehat{\text{CVaR}}_\alpha(\mathbf{r}_{t-K:t}),
+\begin{align}
+  r_t = r^{\text{pnl}}_t + r^{\text{spread}}_t
+        + r^{\text{impact}}_t
+        - \lambda\,\widehat{\mathrm{CVaR}}_\alpha(\mathbf{r}_{t-K:t}),
   \label{eq:reward}
-\end{equation}
+\end{align}
 where $r^{\text{pnl}}_t = \sum_i a_{t-1,i}\,\log(c_{t,i}/c_{t-1,i})$ is
 the realised log-PnL on the previously-held positions,
 $r^{\text{spread}}_t = -s\,\sum_i |a_{t,i}-a_{t-1,i}|$ charges a flat
@@ -744,16 +747,17 @@ Table~\ref{tab:ablation}) and robust across bootstrap samples.
   \centering
   \caption{Main results on the 2022--2024 OOS test split (691 days).}
   \label{tab:main}
+  \resizebox{\columnwidth}{!}{%
   \begin{tabular}{lrrrr}
     \toprule
-    Strategy & Ann.\ Ret.\ & Sharpe & Max DD & Calmar \\
+    Strategy & Ann.\ Ret. & Sharpe [95\% CI] & Max DD & Calmar \\
     \midrule
-    r007 ens.\ (ours)        & $+1.27\%$  & $+0.27\ [-1.05,{+}1.59]$ & $\mathbf{8.64\%}$ & $+0.147$ \\
-    SPY buy-and-hold         & $+11.14\%$ & $+0.70\ [-0.44,{+}2.16]$ & $21.28\%$         & $+0.524$ \\
-    Equal-weight 5-ETF       & $+6.36\%$  & $+0.51\ [-0.70,{+}1.89]$ & $21.31\%$         & $+0.298$ \\
-    60/40 SPY/TLT            & $+2.47\%$  & $+0.25\ [-1.06,{+}1.70]$ & $21.99\%$         & $+0.112$ \\
+    r007 ens.\ (ours)  & $+1.27\%$  & $+0.27\ [-1.05,{+}1.59]$ & $\mathbf{8.64\%}$ & $+0.147$ \\
+    SPY buy-and-hold   & $+11.14\%$ & $+0.70\ [-0.44,{+}2.16]$ & $21.28\%$         & $+0.524$ \\
+    Equal-weight 5-ETF & $+6.36\%$  & $+0.51\ [-0.70,{+}1.89]$ & $21.31\%$         & $+0.298$ \\
+    60/40 SPY/TLT      & $+2.47\%$  & $+0.25\ [-1.06,{+}1.70]$ & $21.99\%$         & $+0.112$ \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}}
 \end{table}
 
 \subsection{Ablation Study}
@@ -787,19 +791,20 @@ under impact-adjusted replay (Section~\ref{sec:results-liquidity}).
   \caption{Component ablation on the OOS test split. Rows A--B
   use 731 days; rows C--G use 691 days (post-2022).}
   \label{tab:ablation}
+  \resizebox{\columnwidth}{!}{%
   \begin{tabular}{clrrrr}
     \toprule
     Row & Configuration & Ann.\ Ret. & Sharpe & Max DD & Calmar \\
     \midrule
-    A & MLP, no CVaR             & $-3.2\%$  & $+0.17$  & $50.9\%$ & $-0.06$ \\
-    B & + CVaR ($\lambda{=}0.01$)& $-1.3\%$  & $+0.18$  & $51.4\%$ & $-0.03$ \\
-    C & + Transformer, no ES     & $-10.8\%$ & $+0.09$  & $71.8\%$ & $-0.15$ \\
-    D & + early stop (50k)       & $+29.0\%$ & $+0.74$  & $56.3\%$ & $+0.52$ \\
-    E & + 5-seed ens.\ (mean)    & $-8.8\%$  & $-0.20$  & $44.2\%$ & $-0.20$ \\
-    \textbf{F} & \textbf{+ uncert.\ sizing (FULL, r007)} & $\mathbf{+1.3\%}$  & $\mathbf{+0.27}$  & $\mathbf{8.6\%}$ & $\mathbf{+0.15}$ \\
-    G & + liquidity env (r008)   & $-2.3\%$  & $-0.23$  & $13.7\%$ & $-0.18$ \\
+    A & MLP, no CVaR              & $-3.2\%$  & $+0.17$ & $50.9\%$ & $-0.06$ \\
+    B & + CVaR ($\lambda{=}0.01$) & $-1.3\%$  & $+0.18$ & $51.4\%$ & $-0.03$ \\
+    C & + Transformer, no ES      & $-10.8\%$ & $+0.09$ & $71.8\%$ & $-0.15$ \\
+    D & + early stop (50k)        & $+29.0\%$ & $+0.74$ & $56.3\%$ & $+0.52$ \\
+    E & + 5-seed ens.\ (mean)     & $-8.8\%$  & $-0.20$ & $44.2\%$ & $-0.20$ \\
+    \textbf{F} & \textbf{+ uncert.\ sizing (r007)} & $\mathbf{+1.3\%}$ & $\mathbf{+0.27}$ & $\mathbf{8.6\%}$ & $\mathbf{+0.15}$ \\
+    G & + liquidity env (r008)    & $-2.3\%$  & $-0.23$ & $13.7\%$ & $-0.18$ \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}}
 \end{table}
 
 \subsection{Per-Seed Variance and the Necessity of Uncertainty Sizing}
@@ -818,19 +823,20 @@ this dataset.
 
 \begin{table}[t]
   \centering
+  \footnotesize
   \caption{Per-seed r007 test performance (each head evaluated alone).}
   \label{tab:perseed}
   \begin{tabular}{crrrr}
     \toprule
-    Seed & Val Sharpe & Test Sharpe & Test Ann.\ Ret. & Test Max DD \\
+    Seed & Val Sh. & Test Sh. & Ann.\ Ret. & Max DD \\
     \midrule
-    42  & $+1.37$ & $-0.35$         & $-30.4\%$         & $71.1\%$ \\
+    42  & $+1.37$ & $-0.35$          & $-30.4\%$          & $71.1\%$ \\
     101 & $+0.68$ & $\mathbf{+0.74}$ & $\mathbf{+26.0\%}$ & $42.0\%$ \\
-    202 & $+0.91$ & $-1.00$         & $-54.7\%$         & $90.4\%$ \\
-    303 & $+1.63$ & $+0.02$         & $-15.2\%$         & $66.2\%$ \\
-    404 & $+0.59$ & $+0.09$         & $-2.4\%$          & $31.3\%$ \\
+    202 & $+0.91$ & $-1.00$          & $-54.7\%$          & $90.4\%$ \\
+    303 & $+1.63$ & $+0.02$          & $-15.2\%$          & $66.2\%$ \\
+    404 & $+0.59$ & $+0.09$          & $-2.4\%$           & $31.3\%$ \\
     \midrule
-    mean of heads & --- & $-0.10$ & $-15.3\%$ & $\approx 60\%$ \\
+    mean & --- & $-0.10$ & $-15.3\%$ & ${\approx}60\%$ \\
     \bottomrule
   \end{tabular}
 \end{table}
